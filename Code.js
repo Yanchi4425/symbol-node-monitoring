@@ -33,15 +33,11 @@ const NOTIFICATION_INTERVAL = 30 * 60 * 1000; // 30分
  */
 function main() {
   try {
-    console.log("Symbol Node Monitoring開始");
-
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
 
     // mainnetとtestnetのシートを処理
     processSheet(spreadsheet, "mainnet", true); // 通知あり
-    // processSheet(spreadsheet, "testnet", false); // 通知なし
-
-    console.log("Symbol Node Monitoring完了");
+    processSheet(spreadsheet, "testnet", false); // 通知なし
   } catch (error) {
     console.error("予期しないエラーが発生しました:", error);
     notifyError(`GASスクリプト実行エラー: ${error.toString()}`);
@@ -61,8 +57,6 @@ function processSheet(spreadsheet, sheetName, enableNotification) {
     return;
   }
 
-  console.log(`${sheetName}シートの処理開始`);
-
   // 監視対象ノードの取得
   const nodes = getMonitoringNodes(sheet);
   if (nodes.length === 0) {
@@ -73,7 +67,6 @@ function processSheet(spreadsheet, sheetName, enableNotification) {
   // 各ノードの監視
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i];
-    console.log(`${sheetName}: ${node.url} の監視開始`);
     monitorNode(sheet, node.row, node.url);
   }
 
@@ -84,8 +77,6 @@ function processSheet(spreadsheet, sheetName, enableNotification) {
   if (enableNotification) {
     processNotifications(sheet, nodes);
   }
-
-  console.log(`${sheetName}シートの処理完了`);
 }
 
 /**
@@ -126,7 +117,7 @@ function monitorNode(sheet, row, nodeUrl) {
       clearHealthData(sheet, row);
       return;
     }
-    
+
     if (healthResult.sslError) {
       // SSL証明書エラー
       setNodeError(sheet, row, STATUS_TYPES.ERROR, ERROR_TYPES.SSL_CERT);
@@ -201,10 +192,26 @@ function checkNodeHealth(nodeUrl) {
     if (errorStr.includes("timeout") || errorStr.includes("Timeout")) {
       return { timeout: true, sslError: false, error: null, db: "", api: "" };
     }
-    if (errorStr.includes("certificate") || errorStr.includes("SSL") || errorStr.includes("TLS")) {
-      return { timeout: false, sslError: true, error: errorStr, db: "", api: "" };
+    if (
+      errorStr.includes("certificate") ||
+      errorStr.includes("SSL") ||
+      errorStr.includes("TLS")
+    ) {
+      return {
+        timeout: false,
+        sslError: true,
+        error: errorStr,
+        db: "",
+        api: "",
+      };
     }
-    return { timeout: false, sslError: false, error: errorStr, db: "", api: "" };
+    return {
+      timeout: false,
+      sslError: false,
+      error: errorStr,
+      db: "",
+      api: "",
+    };
   }
 }
 
@@ -294,11 +301,20 @@ function clearHealthData(sheet, row) {
  * @param {Array<{row: number, url: string}>} nodes
  */
 function checkBlockDelay(sheet, nodes) {
-  const maxHeight = sheet.getRange(1, 3).getValue(); // C1: 基準ブロック高
+  // 全ノードから最大ブロック高を計算
+  let maxHeight = 0;
+  for (const node of nodes) {
+    const height = sheet
+      .getRange(node.row, COLUMN_MAPPING.BLOCK_HEIGHT)
+      .getValue();
+    if (height && height > maxHeight) {
+      maxHeight = height;
+    }
+  }
+
   const threshold = sheet.getRange(1, 7).getValue(); // G1: ブロックしきい値
 
   if (!maxHeight || !threshold) {
-    console.log("基準ブロック高またはしきい値が設定されていません");
     return;
   }
 
@@ -315,9 +331,6 @@ function checkBlockDelay(sheet, nodes) {
         node.row,
         STATUS_TYPES.DELAY,
         ERROR_TYPES.BLOCK_DELAY
-      );
-      console.log(
-        `${node.url}: ブロック遅延検出 (${currentHeight} < ${minAcceptableHeight})`
       );
     }
   }
@@ -374,25 +387,30 @@ function processNotifications(sheet, nodes) {
 function sendNotification(sheet, targets) {
   const now = new Date();
   const message = createNotificationMessage(targets);
+  const subject = createNotificationSubject(targets, "🚨", "Error");
 
-  // メール通知
-  try {
-    let email = Session.getActiveUser().getEmail();
-    if (!email) {
-      email =
-        PropertiesService.getScriptProperties().getProperty("EMAIL_ADDRESS");
-    }
+  // Slack設定があるかチェック
+  const hasSlackConfig = checkSlackConfiguration();
 
-    if (email) {
-      MailApp.sendEmail({
-        to: email,
-        subject: "Symbolノード監視アラート",
-        body: message,
-      });
-      console.log(`メール通知送信完了: ${email}`);
+  // Slack設定がない場合のみメール通知
+  if (!hasSlackConfig) {
+    try {
+      let email = Session.getActiveUser().getEmail();
+      if (!email) {
+        email =
+          PropertiesService.getScriptProperties().getProperty("EMAIL_ADDRESS");
+      }
+
+      if (email) {
+        MailApp.sendEmail({
+          to: email,
+          subject: subject,
+          body: message,
+        });
+      }
+    } catch (error) {
+      console.error("メール通知エラー:", error);
     }
-  } catch (error) {
-    console.error("メール通知エラー:", error);
   }
 
   // Slack通知
@@ -409,6 +427,24 @@ function sendNotification(sheet, targets) {
 }
 
 /**
+ * 日時をyyyy/mm/dd hh:mm:ss形式にフォーマット
+ * @param {Date} date
+ * @returns {string}
+ */
+function formatDateTime(date) {
+  if (!date) return "";
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+
+  return `${year}/${month}/${day} ${hours}:${minutes}:${seconds}`;
+}
+
+/**
  * 通知メッセージを作成
  * @param {Array} targets
  * @returns {string}
@@ -417,10 +453,11 @@ function createNotificationMessage(targets) {
   let message = "Symbolノード監視アラート\n\n";
 
   for (const target of targets) {
+    const formattedErrorDetected = formatDateTime(target.errorDetected);
     message += `URL: ${target.url}\n`;
     message += `ステータス: ${target.status}\n`;
     message += `エラータイプ: ${target.errorType}\n`;
-    message += `エラー検出日時: ${target.errorDetected}\n`;
+    message += `エラー検出日時: ${formattedErrorDetected}\n`;
     message += "\n";
   }
 
@@ -467,8 +504,6 @@ function sendSlackNotification(message) {
       }),
     });
   }
-
-  console.log("Slack通知送信完了");
 }
 
 /**
@@ -476,26 +511,34 @@ function sendSlackNotification(message) {
  * @param {string} nodeUrl
  */
 function sendRecoveryNotification(nodeUrl) {
-  const message = `Symbolノード復旧通知\n\nURL: ${nodeUrl}\nステータス: 復旧完了\n復旧確認日時: ${new Date()}\n\nノードは正常に動作しています。`;
+  const now = new Date();
+  const formattedDate = formatDateTime(now);
+  const message = `Symbolノード復旧通知\n\nURL: ${nodeUrl}\nステータス: 復旧完了\n復旧確認日時: ${formattedDate}\n\nノードは正常に動作しています。`;
+  const domain = extractDomainFromUrl(nodeUrl);
+  const subject = `✅ Symbol Node Monitoring - Recovery - ${domain}`;
 
-  // メール通知
-  try {
-    let email = Session.getActiveUser().getEmail();
-    if (!email) {
-      email =
-        PropertiesService.getScriptProperties().getProperty("EMAIL_ADDRESS");
-    }
+  // Slack設定があるかチェック
+  const hasSlackConfig = checkSlackConfiguration();
 
-    if (email) {
-      MailApp.sendEmail({
-        to: email,
-        subject: "Symbolノード監視 - 復旧通知",
-        body: message,
-      });
-      console.log(`復旧通知メール送信完了: ${email}`);
+  // Slack設定がない場合のみメール通知
+  if (!hasSlackConfig) {
+    try {
+      let email = Session.getActiveUser().getEmail();
+      if (!email) {
+        email =
+          PropertiesService.getScriptProperties().getProperty("EMAIL_ADDRESS");
+      }
+
+      if (email) {
+        MailApp.sendEmail({
+          to: email,
+          subject: subject,
+          body: message,
+        });
+      }
+    } catch (error) {
+      console.error("復旧通知メールエラー:", error);
     }
-  } catch (error) {
-    console.error("復旧通知メールエラー:", error);
   }
 
   // Slack通知
@@ -507,25 +550,81 @@ function sendRecoveryNotification(nodeUrl) {
 }
 
 /**
+ * 通知件名を作成
+ * @param {Array} targets
+ * @param {string} emoji
+ * @param {string} type
+ * @returns {string}
+ */
+function createNotificationSubject(targets, emoji, type) {
+  if (targets.length === 1) {
+    const domain = extractDomainFromUrl(targets[0].url);
+    return `${emoji} Symbol Node Monitoring - ${type} - ${domain}`;
+  } else {
+    return `${emoji} Symbol Node Monitoring - ${type} - ${targets.length} nodes`;
+  }
+}
+
+/**
+ * URLからドメイン名を抽出
+ * @param {string} url
+ * @returns {string}
+ */
+function extractDomainFromUrl(url) {
+  try {
+    // httpsやhttpを削除し、ポート番号も削除
+    const domain = url
+      .replace(/^https?:\/\//, "")
+      .split(":")[0]
+      .split("/")[0];
+    return domain;
+  } catch (error) {
+    return url;
+  }
+}
+
+/**
+ * Slack設定があるかチェック
+ * @returns {boolean}
+ */
+function checkSlackConfiguration() {
+  const properties = PropertiesService.getScriptProperties();
+  const webhookUrl = properties.getProperty("SLACK_WEBHOOK_URL");
+  const token = properties.getProperty("SLACK_TOKEN");
+  const channel = properties.getProperty("SLACK_CHANNEL");
+
+  return !!(webhookUrl || (token && channel));
+}
+
+/**
  * エラー通知
  * @param {string} errorMessage
  */
 function notifyError(errorMessage) {
+  const hasSlackConfig = checkSlackConfiguration();
+
+  // Slack設定がない場合のみメール通知
+  if (!hasSlackConfig) {
+    try {
+      let email = Session.getActiveUser().getEmail();
+      if (!email) {
+        email =
+          PropertiesService.getScriptProperties().getProperty("EMAIL_ADDRESS");
+      }
+
+      if (email) {
+        MailApp.sendEmail({
+          to: email,
+          subject: "⚠️ Symbol Node Monitoring - System Error",
+          body: errorMessage,
+        });
+      }
+    } catch (error) {
+      console.error("エラー通知の送信に失敗:", error);
+    }
+  }
+
   try {
-    let email = Session.getActiveUser().getEmail();
-    if (!email) {
-      email =
-        PropertiesService.getScriptProperties().getProperty("EMAIL_ADDRESS");
-    }
-
-    if (email) {
-      MailApp.sendEmail({
-        to: email,
-        subject: "Symbolノード監視 - システムエラー",
-        body: errorMessage,
-      });
-    }
-
     sendSlackNotification(`System Error: ${errorMessage}`);
   } catch (error) {
     console.error("エラー通知の送信に失敗:", error);
